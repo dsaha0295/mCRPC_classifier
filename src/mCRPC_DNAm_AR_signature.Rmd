@@ -1,0 +1,106 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+#Load libraries
+```{r}
+#Load libraries
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(pheatmap)
+library(viridis)
+```
+
+#Read in clinical annotations, RNAseq, and DMR data
+```{r}
+#Clin anno
+clin <- read.table("/Users/ds/Desktop/projects/data/anno/202009_deepRNAseq_sample_full.txt", header = T) %>% dplyr::select(c("sample_id","wgs_id", "AR", "disease_type_SIG_GEX", "AR_enhancer")) %>% na.omit()
+
+#Rna CPM, log xform, tranpose and subset
+rna <- read.table("/Users/ds/Desktop/projects/data/rna/mCRPC.CPM.normcounts.txt", header = T) %>% filter(Genename %in% "AR")
+
+rna <- log1p(rna[-1]) %>% t() %>% data.frame(gsub("\\.", "-", row.names(.)))
+colnames(rna) <- c("AR_RNA", "sample_id")
+
+#DMR for AR amp vs WT and format
+dmr <- read.table("/Users/ds/Desktop/scratch/DNAm/Signature/all.dmr.AR.txt", header = T)
+coordinates <- dmr$Coord
+dmr <- t(dmr[,-1])
+colnames(dmr) <- coordinates
+```
+
+#PCA of DMR data
+```{r}
+prcomp(dmr, center = T, scale = T) %>% screeplot()#screeplot
+#Get PCs
+pca <- prcomp(dmr, center = T, scale = T) %>% .$x %>% data.frame()
+pca$wgs_id <- gsub("\\.", "-", row.names(pca))
+
+
+#Merge and de-duplicate
+pca <- merge(clin, pca) %>% merge(rna) 
+
+pca <- pca[!duplicated(pca$wgs_id),]
+pca$AR <- factor(pca$AR)
+pca$AR_enhancer <- factor(pca$AR_enhancer)
+```
+
+#Plot LM of AR regulon activity vs genomic status and DMR
+```{r}
+#Merge with AR regulon scores
+pca <- pca %>% merge(dplyr::select(ar_activity, c(AR_regulon_activity, sample_id)))
+
+
+pca <- pca %>% arrange(AR_regulon_activity) %>% mutate(Index = 1:61)
+
+#Create reduced and full models
+md1 <- lm(AR_regulon_activity ~ AR,  data = pca) 
+md2 <- lm(AR_regulon_activity ~ AR + PC1 + PC2,  data = pca) 
+
+#F test
+anova(md1,md2)
+
+
+summary(md1)
+summary(md2)
+
+#PRedict fitted values
+pca$md1 <- predict(md1)
+pca$md2 <- predict(md2)
+
+
+#Plot both models with observed data
+pdf("/Users/ds/Desktop/DMR_loess.pdf", width = 10)
+gather(pca, key = "Type", value = "Pred_score", - c(AR, paste0("PC", 1:48), sample_id, wgs_id, Index, AR_RNA,disease_type_SIG_GEX, AR_enhancer , cluster)) %>% ggplot(aes(x = Index, y = Pred_score, color = Type)) + geom_point(aes(shape = factor(cluster))) + geom_smooth(se = F) + scale_color_manual(values = c("darkred", "darkgreen", "darkblue"), labels = c("Observed", "Model with AR status", "Model with AR status and DNAm")) + ylab("AR Regulon Activity") + ggtitle("Observed and Predicted values for AR activity") 
+dev.off()
+
+?facet_wrap
+
+#Same plot but now as boxplots - discrete
+#gather(pca, key = "Type", value = "Pred_score", - c(AR, paste0("PC", 1:48), sample_id, wgs_id, Index, AR_RNA,disease_type_SIG_GEX, AR_enhancer )) %>% group_by(Type) %>% mutate(Group = ntile(Pred_score, 4)) %>% ggplot(aes(x = factor(Group), y = Pred_score, fill = Type)) + geom_boxplot() + scale_fill_manual(values = c("darkred", "darkgreen", "darkblue", "black")) 
+
+
+
+```
+
+#Heatmap 
+```{r}
+
+#Plot heatmap and cluster columns
+row.names(pca) <- pca$sample_id
+colors <- list( AR = c("2" = "white", "3" = "darkgreen"), disease_type_SIG_GEX = c(small_cell = "white", adeno = "darkblue"), AR_enhancer = c("2" = "white", "3" = "darkred"))
+pheatmap(mat= t(pca[,c("AR_regulon_activity"), drop = F]), annotation_col = pca[,c( "AR", "AR_RNA", "disease_type_SIG_GEX", "AR_enhancer")],  annotation_colors = colors, cellheight = 10, border_color = "black", filename = "/Users/ds/Desktop/AR_regulon activity.pdf", cellwidth = 10, height = 20, width = 20, cluster_rows = F) 
+
+#Plot clusters of AR scores
+res <- pheatmap(mat= t(pca[,c("AR_regulon_activity"), drop = F]), silent = T, cluster_rows = F)
+pca <- res$tree_col %>% cutree(k = 3) %>% data.frame(cluster = ., sample_id  = names(.)) %>% merge(pca) 
+
+
+ggplot(data = pca, aes(x = factor(AR), y = AR_regulon_activity)) + geom_boxplot(outlier.alpha = 0) + geom_jitter(aes(color = AR)) + scale_color_viridis_d( end = 0.5) + xlab("AR") + ggtitle("AR regulon activity vs genomic status")
+
+colnames(dmr) %>% str_split("\\.") %>% unlist() %>% matrix(ncol = 3, byrow = T) %>% write.table("/Users/ds/Desktop/scratch/DNAm/Signature/")
+
+```
+
+
