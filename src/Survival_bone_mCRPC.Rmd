@@ -1,0 +1,194 @@
+---
+title: "TME classifiers of rHMR mCRPC"
+output: html_notebook
+author: Debanjan Saha
+---
+
+#Load libraries
+```{r}
+library(tidyverse)
+library(rsample)   # for resampling procedures
+library(caret)
+library(ggpubr)
+library(survival)
+library(survminer)
+library(survMisc)
+library(glmnet)
+library(vip)
+```
+
+
+#Read in HMR data - only use rHMR found in >=50 samples  from Zhao et al #Read in RNAseq and Cibersortx data and merge
+```{r}
+
+
+read_merge_data <- function(log_xform = TRUE){
+  
+  ####################### Read in and format consensus rHMR data - samples on rows, features on columns - from Aggregate_cpg.R ################################
+  # hmr <- read.table(file = "/Users/ds/Desktop/projects/data/bs/all.rHMR.txt", header = T)
+  # coordinates <- hmr$Coord
+  # hmr <- t(hmr[,-1]) %>% data.frame()
+  # colnames(hmr) <- coordinates
+  # row.names(hmr) <- row.names(hmr) %>% gsub(pattern = "\\.", replacement = "-")
+  # 
+  # hmr$IDENTIFIER <- row.names(hmr)
+
+
+  
+  ########################## Read in annotations and genomic data ##############################################
+  
+  anno1 <- read.csv( "/Users/ds/Desktop/projects/data/anno/Cell2018_supp_T1.csv", header = T) 
+  anno2 <- read.csv( "/Users/ds/Desktop/projects/data/anno/Nat_Gen_sampleanno.csv", header = T) 
+  anno <- inner_join(anno1, anno2, by = c("IDENTIFIER" = "Sample"))
+  anno$Patient.ID <- anno$IDENTIFIER %>% gsub(pattern = "-BL|-PRO|-PRO2", replacement = "")
+  
+  
+  #Read in tumor purity data
+  pur <- read.csv("/Users/ds/Desktop/projects/data/anno/WGS_tumor_purity_AF_012318.csv", header = T) %>% dplyr::select(c("WGS.Tumor.Sample.ID","Tumor.Purity.Comp"))
+  
+  pur$Patient.ID <- pur$WGS.Tumor.Sample.ID %>% gsub(pattern = "-BL|-PRO|-PRO2", replacement = "") 
+  
+  pur <- pur %>% dplyr::filter(WGS.Tumor.Sample.ID != "DTB-265-BL"	)
+  
+  
+  
+  ################### Read in clinical data for OS ##################################
+  clin <- read.csv("/Users/ds/Desktop/projects/data/anno/Chen_2019_European_Eurology_Supp4.csv", header = T)
+  
+  
+  
+  #################### Read in RNA deconvolution results ###############################
+
+  cf <- cf <- read.table("/Users/ds/Desktop/scRNA/CIBERSORTx_Job30_Adjusted.txt", sep = "\t", header = T) %>% dplyr::select(-c(P.value, Correlation, RMSE))
+  celltypes <- colnames(cf)[-1]
+  cf$Mixture <- gsub("\\.", "-", cf$Mixture)
+  cf$Patient.ID <- cf$Mixture %>% gsub(pattern = "-BL|-PRO|-PRO2", replacement = "")
+
+  
+  
+  ######################## Read in RNA CPM data ###########################################
+  # rna <- read.table(file = "/Users/ds/Desktop/projects/data/rna/2018_04_15_matrix_rna_CPM_genename.txt", header= T)
+  # markers <- rna$Gene #Get the new order for markers
+  # 
+  # #Transpose and log xform
+  # if (log_xform == T){rna <- rna[,-1] %>% t() %>% log1p() %>% data.frame() }
+  # else { rna <- rna[,-1] %>% t() %>% data.frame() }
+  # 
+  # row.names(rna) <- row.names(rna) %>% gsub(pattern = "\\.", replacement = "-")
+  # colnames(rna) <- markers
+  # 
+  # rna$Patient.ID <- row.names(rna) %>% gsub(pattern = "-BL|-PRO|-PRO2", replacement = "")
+
+  
+  ###################### Merge data sets based on patient IDs #################################################
+  
+  #Merge datasets         
+  cf <- merge(cf, clin)  %>% merge(pur) %>% merge(anno) #%>% merge(hmr)
+  
+  #Group/process columns
+  cf <- cf %>% mutate(Bone = factor(ifelse(metastasis_biopsy_site == "bone", 1, 0) ))#Format metastatic site
+  row.names(cf) <- cf$IDENTIFIER
+  
+  
+  cf <- cf %>% mutate(Enzalutamide.resistant =  as.numeric(Enzalutamide.resistant)) %>% mutate(Type = as.factor(ifelse(Type == "mCRPC", 1, ifelse(Type == "mCRPC (CMP)", 1, 2)))) 
+  
+  return(cf)
+}
+
+cf <- read_merge_data()
+
+
+```
+
+
+
+#Split test/train
+```{r}
+
+set.seed(123)#Set seed for splitting
+cf <- cf[!is.na(cf$OS.mCRPC),]
+
+#Split 70/30
+split <- initial_split(cf, prop = 0.7, strata = "Bone")
+cf_train  <- training(split)
+cf_test   <- testing(split)
+
+```
+
+
+
+
+
+#Elastic net cox regression using rHMRs
+```{r}
+set.seed(123)
+
+#dmr_train %>% mutate(IDENTIFIER = row.names(.))
+y <- with(cf_train, Surv(time = OS.mCRPC, event = Event))
+x <- dplyr::select(cf_train, starts_with("chr", ignore.case = F)) %>% as.matrix()
+
+
+
+
+cvfit <- cv.glmnet(x, y, family = "cox", type.measure = "C")
+
+pdf("/Users/ds/Desktop/plot.pdf", width = 10)
+plot(cvfit)
+dev.off()
+
+res <- vi(cvfit) %>% dplyr::filter(Importance != 0)
+
+res$Importance <- as.numeric(res$Importance)
+vip(cvfit, num_features = 23)
+
+pdf("/Users/ds/Desktop/plot.pdf", width = 10)
+res %>% ggplot(aes(x = Importance, y = reorder(Variable, Importance), fill = Sign)) + geom_col() + scale_fill_viridis_d(end = 0.5) + ylab("HMR")
+dev.off()
+
+
+res
+regions <- res %>% dplyr::filter(Importance != 0 & Sign == "POS") %>% .$Variable
+regions
+```
+
+#Plots
+```{r}
+
+
+#Cox PH model for methylation of pathway genes
+
+
+cf_test$Methylation <- cf_test[,regions] %>% scale() %>% rowMeans() 
+
+
+pdf("/Users/ds/Desktop/plot.pdf", width = 10)
+coxph(Surv(time = OS.mCRPC, event = Event)~ PSA.At.Biopsy + LDH.at.biopsy + Hemoglobin.at.biopsy  + Enzalutamide.resistant +  ECOG.PS + ALP  + Bone + Methylation, data = cf_test) %>% ggforest()
+dev.off()
+
+
+
+
+
+anno <- read.table("/Users/ds/Desktop/projects/data/bs/rHMR_mCRPC_consensus_protein_coding.bed", fill = T)
+anno <- anno  %>% mutate(HMR = paste0(V1, ".", V2,".", V3), Genes = V19) %>% dplyr::select(c(HMR, Genes))
+anno <- dplyr::filter(anno, HMR %in% regions)
+
+
+res <- inner_join(res, anno, by = c("Variable" = "HMR")) 
+
+pdf("/Users/ds/Desktop/plot.pdf", width = 10)
+res%>% ggplot(aes(x = reorder(Variable, -Importance), y = Importance, label = Genes)) + geom_point() + geom_line() + geom_label(color = "darkblue") + theme(axis.text.x = element_text(angle = 45, vjust = 0.5))+ xlab("HMR")
+dev.off()
+
+pdf("/Users/ds/Desktop/plot.pdf", width = 10)
+DotPlot(object = scrna, features = res$Genes)
+dev.off()
+
+
+
+
+```
+
+
+
+
