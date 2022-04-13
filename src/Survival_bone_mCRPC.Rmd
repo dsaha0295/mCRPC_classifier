@@ -59,7 +59,7 @@ read_merge_data <- function(log_xform = TRUE){
   
   #################### Read in RNA deconvolution results ###############################
 
-  cf <- cf <- read.table("/Users/ds/Desktop/scRNA/CIBERSORTx_Job30_Adjusted.txt", sep = "\t", header = T) %>% dplyr::select(-c(P.value, Correlation, RMSE))
+  cf <- cf <- read.table("/Users/ds/Desktop/projects/BME_analysis/results/CIBERSORTx_Job30_Adjusted.txt", sep = "\t", header = T) %>% dplyr::select(-c(P.value, Correlation, RMSE))
   celltypes <- colnames(cf)[-1]
   cf$Mixture <- gsub("\\.", "-", cf$Mixture)
   cf$Patient.ID <- cf$Mixture %>% gsub(pattern = "-BL|-PRO|-PRO2", replacement = "")
